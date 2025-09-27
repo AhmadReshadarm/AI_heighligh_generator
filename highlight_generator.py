@@ -12,20 +12,34 @@ from PIL import Image
 
 # --- Configuration ---
 # The model files are expected to be on your SSD (D: drive).
-model_path = r"D:\hugging_face_ai_model" # Using raw string with backslashes
+# model_path = r"D:\hugging_face_ai_model"  # my PC
+model_path = r"C:\llava-model" # Using raw string with backslashes
 SYSTEM_PROMPT = (
     "You are an expert stream analyst. Rate the current video frame based on its **Highlight Potential (1-10)**. "
-    "Highlight Potential is defined by **AUDITORY AND EMOTIONAL INTENSITY**, inferred from visual cues. "
-    "You MUST prioritize high scores for visual indicators of loud events. "
-    "**VISUAL PROXIES FOR AUDIO:** Look for open mouths, visible shock/fear, major on-screen explosions/events, and rapid screen shaking, as these strongly imply screaming or loud game noise. "
-    "You MUST use the full range of scores (1 to 10). "
-    "**CRITICAL RULE FOR LOW SCORES (1-2)**: You MUST score 1 or 2 if the streamer is NOT showing a strong emotional change (e.g., neutral/idle face), or if the screen content is static, shows a menu, a scorecard, or simple navigation/walking for over 5 seconds. Complex *static* overlays (like VTuber backgrounds) must be scored 1 or 2. "
-    "10 = Extreme Intensity (Screaming, clear shock/fear expression, massive in-game explosion/success). "
-    "7-9 = High Intensity (Intense focus, rapid action, visible startle, big smile/laugh). "
-    "3-6 = Medium Intensity (Mild conversation, minor movement, slightly engaged expression). "
-    "1-2 = Low Intensity (Static scene, static scorecard/menu, neutral avatar, idle chat). "
-    "RESPOND ONLY with a single JSON object containing the numeric score, like this: "
-    '{"score": 1}' 
+"Highlight Potential is defined by **AUDITORY AND EMOTIONAL INTENSITY**, which you will infer from **visual cues** alone. A high score indicates a moment likely to be part of an engaging YouTube Short. "
+"You **MUST** prioritize high scores for visual indicators of loud events and strong emotional reactions. "
+"**Special Rule for VTubers:** Since VTuber avatars have limited emotional range, you **MUST** prioritize the on-screen action, rapid avatar movement, and in-game events as proxies for emotion and intensity. The avatar's expression is a secondary cue. "
+"**VISUAL PROXIES FOR AUDIO AND EMOTION:** Look for open mouths, wide eyes, visible shock, fear, or excitement. Also, consider major in-game explosions, rapid screen shaking, and sudden character movements, as these strongly imply loud noises or intense emotional states. "
+"You **MUST** use the full range of scores from 1 to 10. "
+"**Scoring Criteria Breakdown:** "
+"**Score 10: Extreme Intensity** 🤩 The streamer's face (or VTuber's avatar) shows an **extreme** and unmistakable emotional peak, such as screaming, crying tears of laughter, or a look of clear terror. The VTuber avatar is moving erratically and quickly. The on-screen action is at its most chaotic or climactic point, such as a massive, screen-filling explosion, a final boss defeat, or an impossible clutch victory. The camera shakes violently. The visual cues are so strong that a loud, peak event is guaranteed. "
+"**Scores 7-9: High Intensity** 😲 The streamer is showing a clear, strong emotional reaction. This includes genuine surprise, intense focus (furrowed brows, biting lips), or a big, toothy grin and excited laughter. The reaction is sudden and visible. For VTubers, this is when their avatar shows a visible emotion (even a limited one) while the on-screen action is intense. The action is rapid and requires significant focus. This might be a fast-paced gunfight, a complex sequence in a rhythm game, or a major in-game event like a building collapsing. "
+"**Scores 3-6: Medium Intensity** 🤔 The streamer is engaged in a mild conversation, laughing quietly, or showing a slightly engaged or confused expression. For VTubers, this is the standard 'just playing the game' state with minor avatar movements. There is a moderate level of on-screen activity, such as simple movement, dialogue-heavy scenes, or a slow build-up to an event. This is the **standard 'just playing the game' range.** "
+"**Scores 1-2: Low Intensity** 😴 The streamer's face is neutral, idle, or completely static. There is no visible change in their expression. This includes moments where their face is obscured or a VTuber avatar is idle with no on-screen action. The screen is static for more than 5 seconds. This includes menus, scoreboards, inventory screens, simple walking/navigation with no conflict, or a static 'Be Right Back' screen. "
+"RESPOND ONLY with a single JSON object containing the numeric score, like this: "
+'{"score": 1}'
+    # "You are an expert stream analyst. Rate the current video frame based on its **Highlight Potential (1-10)**. "
+    # "Highlight Potential is defined by **AUDITORY AND EMOTIONAL INTENSITY**, inferred from visual cues. "
+    # "You MUST prioritize high scores for visual indicators of loud events. "
+    # "**VISUAL PROXIES FOR AUDIO:** Look for open mouths, visible shock/fear, major on-screen explosions/events, and rapid screen shaking, as these strongly imply screaming or loud game noise. "
+    # "You MUST use the full range of scores (1 to 10). "
+    # "**CRITICAL RULE FOR LOW SCORES (1-2)**: You MUST score 1 or 2 if the streamer is NOT showing a strong emotional change (e.g., neutral/idle face), or if the screen content is static, shows a menu, a scorecard, or simple navigation/walking for over 5 seconds. Complex *static* overlays (like VTuber backgrounds) must be scored 1 or 2. "
+    # "10 = Extreme Intensity (Screaming, clear shock/fear expression, massive in-game explosion/success). "
+    # "7-9 = High Intensity (Intense focus, rapid action, visible startle, big smile/laugh). "
+    # "3-6 = Medium Intensity (Mild conversation, minor movement, slightly engaged expression). "
+    # "1-2 = Low Intensity (Static scene, static scorecard/menu, neutral avatar, idle chat). "
+    # "RESPOND ONLY with a single JSON object containing the numeric score, like this: "
+    # '{"score": 1}' 
 )
 
 # --- Segmentation Constants ---
@@ -37,8 +51,21 @@ CONTEXT_PRE_ROLL_SECONDS = 20  # Lead-in for context
 CONTEXT_POST_ROLL_SECONDS = 10 # Cool-down for reaction
 MINIMUM_FINAL_DURATION_S = 30.0 # Enforce a minimum clip length after buffers
 
-# --- Resource Capping for 12GB VRAM Systems ---
-GPU_DEVICE = "cuda" # Simplified device map to force GPU load (cuda:0)
+# --- Dynamic Device Detection ---
+if torch.cuda.is_available():
+    DEVICE = "cuda"
+    print(f"INFO: CUDA GPU detected. Using {torch.cuda.get_device_name(0)}.", file=sys.stderr)
+    # Configuration specific to GPU load
+    LOAD_DTYPE = torch.float16 # Use half-precision for speed and VRAM savings
+    USE_QUANTIZATION = True
+    DEVICE_MAP_ARG = "auto" # Use "auto" for smart placement on GPU
+else:
+    DEVICE = "cpu"
+    print("INFO: No CUDA GPU or CUDA environment not enabled. Falling back to CPU.", file=sys.stderr)
+    # Configuration specific to CPU load
+    LOAD_DTYPE = torch.float32 # CPUs prefer float32 for stability and performance
+    USE_QUANTIZATION = False
+    DEVICE_MAP_ARG = None
 
 # --- Utility Functions ---
 
@@ -52,35 +79,47 @@ def cleanup_directory(output_dir):
         except Exception as e:
             print(f"Cleanup Error: Could not remove {debug_dir}: {e}", file=sys.stderr)
 
-def load_ai_model(path: str):
-    """Loads the Llava model, tokenizer, and processor from the specified local path."""
-    print(f"Initializing AI model from local path: {path}")
+def load_ai_model(path: str, device: str, load_dtype: torch.dtype, use_quantization: bool, device_map_arg: str | None):
+    """Loads the Llava model, tokenizer, and processor, dynamically configuring for CPU or GPU."""
+    print(f"Initializing AI model from local path: {path} on device: {device}")
 
     # Use AutoTokenizer and AutoProcessor for compatibility
     tokenizer = AutoTokenizer.from_pretrained(path)
     processor = AutoProcessor.from_pretrained(path) 
 
-    # Use BitsAndBytesConfig for 4-bit quantization and GPU optimization
-    quantization_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16
-    )
+    quantization_config = None
+    if use_quantization:
+        # BitsAndBytesConfig is used ONLY for GPU loading to save VRAM
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16
+        )
 
     try:
-        print("DEBUG: Attempting to call LlavaForConditionalGeneration.from_pretrained...", file=sys.stderr, flush=True)
+        print(f"DEBUG: Loading model with dtype={load_dtype} and quantization={use_quantization}...", file=sys.stderr, flush=True)
         
-        # Force load to GPU using device_map
         model = LlavaForConditionalGeneration.from_pretrained(
             path,
-            torch_dtype=torch.float16,
-            device_map=GPU_DEVICE, # Force load to GPU
-            quantization_config=quantization_config
+            torch_dtype=load_dtype,
+            quantization_config=quantization_config if use_quantization else None,
+            # Use device_map only if it's set (for GPU auto placement)
+            device_map=device_map_arg 
         )
-        print("SUCCESS: Model, Tokenizer, and Processor loaded.", file=sys.stderr, flush=True)
+        
+        # If device_map was not used (CPU mode), explicitly move the model to the determined device
+        if device_map_arg is None:
+            model.to(device)
+
+        print(f"SUCCESS: Model, Tokenizer, and Processor loaded onto {model.device}.", file=sys.stderr, flush=True)
         return model, tokenizer, processor
     except Exception as e:
         print(f"FATAL ERROR during model initialization: {e}", file=sys.stderr, flush=True)
+        # Add a specific message to help debug CPU vs GPU issues
+        if device == 'cpu':
+            print("HINT: If this is a memory error on CPU, try a smaller model.", file=sys.stderr)
+        else:
+             print("HINT: If this is a CUDA error, ensure your driver and CUDA toolkit are compatible with your PyTorch installation.", file=sys.stderr)
         return None, None, None
 
 def run_inference(model, tokenizer, processor, image, prompt, is_scoring=True):
@@ -114,6 +153,7 @@ def run_inference(model, tokenizer, processor, image, prompt, is_scoring=True):
             print("FATAL INPUT ERROR: 'input_ids' key is missing.", file=sys.stderr)
             return 0 if is_scoring else "Tokenizer failed."
         
+        # CRITICAL: Move input tensors to the model's determined device (CPU or CUDA)
         inputs = {k: v.to(model.device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
         
         if tokenizer.pad_token_id is None:
@@ -208,10 +248,10 @@ def merge_segments_intelligently(highlight_segments, scores, frame_rate):
         is_gap_high_intensity = False
         
         if not gap_samples:
-             # If the gap is too small to contain a full 5-second sample point, 
-             # and the gap is small (e.g., less than 5 seconds), we assume continuous action and merge.
-             if gap_time_s < 5.0:
-                 is_gap_high_intensity = True
+              # If the gap is too small to contain a full 5-second sample point, 
+              # and the gap is small (e.g., less than 5 seconds), we assume continuous action and merge.
+              if gap_time_s < 5.0:
+                  is_gap_high_intensity = True
         else:
             gap_scores = [scores[frame_idx] for frame_idx in gap_samples]
             avg_gap_score = sum(gap_scores) / len(gap_scores)
@@ -236,13 +276,14 @@ def analyze_video(video_path, output_dir):
     """Analyzes video for highlights using the Llava AI model."""
 
     # --- Model Loading (Attempt once at the start) ---
-    model, tokenizer, processor = load_ai_model(model_path)
+    # Pass the global device configuration to the loading function
+    model, tokenizer, processor = load_ai_model(model_path, DEVICE, LOAD_DTYPE, USE_QUANTIZATION, DEVICE_MAP_ARG)
     if model is None:
         print("FATAL: AI Model failed to load. Cannot proceed with analysis.", file=sys.stderr)
         return []
 
-    print(f"Analyzing video: {video_path} using local Llava model.")
-    print("INFO: Starting video analysis loop.", file=sys.stderr)
+    print(f"Analyzing video: {video_path} using local Llava model.", file=sys.stderr)
+    print(f"INFO: Model is running on device: {model.device}", file=sys.stderr)
 
     if not os.path.exists(video_path):
         print(f"Error: Video file not found at {video_path}", file=sys.stderr)
@@ -364,9 +405,9 @@ def analyze_video(video_path, output_dir):
 
         
         if final_duration < MINIMUM_FINAL_DURATION_S:
-             # Skip this segment if the buffered duration is too short
-             print(f"Skipping segment: final duration {final_duration:.2f}s is less than minimum {MINIMUM_FINAL_DURATION_S}s.", file=sys.stderr)
-             continue
+              # Skip this segment if the buffered duration is too short
+              print(f"Skipping segment: final duration {final_duration:.2f}s is less than minimum {MINIMUM_FINAL_DURATION_S}s.", file=sys.stderr)
+              continue
         
         # NOTE: No upper duration cap is enforced.
         
@@ -436,7 +477,7 @@ def analyze_video(video_path, output_dir):
 # --- Main Script Execution ---
 
 if __name__ == '__main__':
-    print("Python script initialized. Waiting for input from Next.js API route.", flush=True)
+    print(f"Python script initialized. Running on {DEVICE}.", flush=True)
     
     output_dir = None
     try:
@@ -462,4 +503,4 @@ if __name__ == '__main__':
     finally:
         # Cleanup runs whether try succeeds or fails, as long as output_dir was set
         if output_dir is not None and os.path.exists(output_dir):
-             cleanup_directory(output_dir)
+              cleanup_directory(output_dir)

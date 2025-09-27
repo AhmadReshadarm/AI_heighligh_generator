@@ -22,6 +22,9 @@ interface ErrorResponse {
 export const config = {
   api: {
     bodyParser: false,
+    // ADJUSTED FIX: Increased the internal Next.js request size limit to 6GB
+    // to handle large video files (e.g., 10+ hour streams).
+    sizeLimit: "6gb",
   },
 };
 
@@ -37,11 +40,15 @@ const parseForm = (
     const form = new IncomingForm({
       uploadDir: VIDEO_UPLOAD_DIR,
       keepExtensions: true,
-      maxFileSize: 500 * 1024 * 1024, // 500MB limit
+      // ADJUSTED: Increased formidable's maxFileSize to 6GB (6 * 1024 * 1024 * 1024 bytes)
+      maxFileSize: 6 * 1024 * 1024 * 1024,
     });
 
     form.parse(req, (err, fields, files) => {
-      if (err) return reject(err);
+      if (err) {
+        console.error("Formidable parse error:", err);
+        return reject(err);
+      }
 
       const videoFile = files.video?.[0];
       if (!videoFile) {
