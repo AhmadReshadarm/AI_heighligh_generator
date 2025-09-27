@@ -7,12 +7,13 @@ import torch
 import numpy as np
 import subprocess
 import shutil
+import gc # ADDED: Import garbage collector
 from transformers import LlavaForConditionalGeneration, AutoTokenizer, AutoProcessor, BitsAndBytesConfig
 from PIL import Image
 
 # --- Configuration ---
 # The model files are expected to be on your SSD (D: drive).
-# model_path = r"D:\hugging_face_ai_model"  # my PC
+# model_path = r"D:\hugging_face_ai_model"   # my PC
 model_path = r"C:\llava-model" # Using raw string with backslashes
 SYSTEM_PROMPT = (
     "You are an expert stream analyst. Rate the current video frame based on its **Highlight Potential (1-10)**. "
@@ -28,7 +29,7 @@ SYSTEM_PROMPT = (
 "**Scores 1-2: Low Intensity** 😴 The streamer's face is neutral, idle, or completely static. There is no visible change in their expression. This includes moments where their face is obscured or a VTuber avatar is idle with no on-screen action. The screen is static for more than 5 seconds. This includes menus, scoreboards, inventory screens, simple walking/navigation with no conflict, or a static 'Be Right Back' screen. "
 "RESPOND ONLY with a single JSON object containing the numeric score, like this: "
 '{"score": 1}'
-    # "You are an expert stream analyst. Rate the current video frame based on its **Highlight Potential (1-10)**. "
+  # "You are an expert stream analyst. Rate the current video frame based on its **Highlight Potential (1-10)**. "
     # "Highlight Potential is defined by **AUDITORY AND EMOTIONAL INTENSITY**, inferred from visual cues. "
     # "You MUST prioritize high scores for visual indicators of loud events. "
     # "**VISUAL PROXIES FOR AUDIO:** Look for open mouths, visible shock/fear, major on-screen explosions/events, and rapid screen shaking, as these strongly imply screaming or loud game noise. "
@@ -126,6 +127,8 @@ def run_inference(model, tokenizer, processor, image, prompt, is_scoring=True):
     """
     Handles the core inference logic for both scoring and description.
     Returns the integer score (1-10) or the descriptive string.
+    
+    Includes memory and cache cleanup for performance.
     """
     if model is None or tokenizer is None or processor is None:
         return 0 if is_scoring else "Model not initialized."
@@ -142,6 +145,7 @@ def run_inference(model, tokenizer, processor, image, prompt, is_scoring=True):
 
         # Construct the LLaVA prompt format
         if is_scoring:
+            # Note: The system prompt is already defined globally and is part of the prompt
             llava_prompt = f"USER: <image>\n{SYSTEM_PROMPT}\n{prompt}\nASSISTANT:"
         else:
             llava_prompt = f"USER: <image>\n{prompt}\nASSISTANT:"
@@ -167,39 +171,58 @@ def run_inference(model, tokenizer, processor, image, prompt, is_scoring=True):
             )
 
         if output_ids is None or output_ids.dim() == 0 or output_ids.size(0) == 0:
-            return 0 if is_scoring else "Model generation failed."
-        
-        input_len = inputs['input_ids'].size(1)
-        raw_response = tokenizer.decode(output_ids[0, input_len:], skip_special_tokens=True).strip()
-
-        if not is_scoring:
-            # Return raw description text
-            return raw_response
-
-        # --- Structured Output Parsing for Scoring ---
-        json_start = raw_response.find('{')
-        json_end = raw_response.rfind('}') + 1
-
-        if json_start != -1 and json_end != 0:
-            json_str = raw_response[json_start:json_end]
-            try:
-                data = json.loads(json_str)
-                score = int(data.get("score", 0))
-                return max(1, min(10, score)) # Clamp score between 1 and 10
-            except json.JSONDecodeError:
-                print(f"AI returned invalid JSON: {json_str}", file=sys.stderr)
-                return 0
+            raw_response = "Model generation failed."
+            score = 0
         else:
-            # If JSON parsing fails, try to aggressively extract a score if the model just output a number
-            try:
-                score = int(raw_response.strip())
-                return max(1, min(10, score))
-            except ValueError:
-                print(f"AI returned non-JSON/non-numeric response: {raw_response[:50]}...", file=sys.stderr)
-                return 0
+            input_len = inputs['input_ids'].size(1)
+            raw_response = tokenizer.decode(output_ids[0, input_len:], skip_special_tokens=True).strip()
+
+            if not is_scoring:
+                score = 0 # Not applicable for description mode
+            else:
+                # --- Structured Output Parsing for Scoring ---
+                json_start = raw_response.find('{')
+                json_end = raw_response.rfind('}') + 1
+
+                if json_start != -1 and json_end != 0:
+                    json_str = raw_response[json_start:json_end]
+                    try:
+                        data = json.loads(json_str)
+                        score = int(data.get("score", 0))
+                        score = max(1, min(10, score)) # Clamp score between 1 and 10
+                    except json.JSONDecodeError:
+                        print(f"AI returned invalid JSON: {json_str}", file=sys.stderr)
+                        score = 0
+                else:
+                    # If JSON parsing fails, try to aggressively extract a score if the model just output a number
+                    try:
+                        score = int(raw_response.strip())
+                        score = max(1, min(10, score))
+                    except ValueError:
+                        print(f"AI returned non-JSON/non-numeric response: {raw_response[:50]}...", file=sys.stderr)
+                        score = 0
+        
+        # --- ADDED: CRITICAL Cleanup for GPU Performance ---
+        # Explicitly delete large tensor objects
+        del inputs
+        if 'output_ids' in locals():
+            del output_ids
+        
+        # Clear CUDA cache and run garbage collection
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache() 
+        gc.collect() 
+        # --- END Cleanup ---
+
+        return score if is_scoring else raw_response
+
 
     except Exception as e:
         print(f"Error during AI inference: {e}", file=sys.stderr)
+        # Final cleanup attempt after error
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache() 
+        gc.collect() 
         return 0 if is_scoring else f"Inference Error: {e}"
 
 def get_highlight_score(model, tokenizer, processor, image, prompt):
@@ -248,10 +271,10 @@ def merge_segments_intelligently(highlight_segments, scores, frame_rate):
         is_gap_high_intensity = False
         
         if not gap_samples:
-              # If the gap is too small to contain a full 5-second sample point, 
-              # and the gap is small (e.g., less than 5 seconds), we assume continuous action and merge.
-              if gap_time_s < 5.0:
-                  is_gap_high_intensity = True
+             # If the gap is too small to contain a full 5-second sample point, 
+             # and the gap is small (e.g., less than 5 seconds), we assume continuous action and merge.
+             if gap_time_s < 5.0:
+                 is_gap_high_intensity = True
         else:
             gap_scores = [scores[frame_idx] for frame_idx in gap_samples]
             avg_gap_score = sum(gap_scores) / len(gap_scores)
@@ -326,6 +349,12 @@ def analyze_video(video_path, output_dir):
     scores = {} # {frame_index: score}
     user_prompt = "Rate the current frame for high-action or highlight potential."
     
+    # --- ADDED: Pre-loop Cleanup for stable start on GPU ---
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
+    # --- END Cleanup ---
+
     # Start the analysis loop after the skipped frames
     for current_frame_index in range(start_frame_index, total_frames, frame_interval):
         cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame_index)
