@@ -7,42 +7,35 @@ import torch
 import numpy as np
 import subprocess
 import shutil
-import re
-import xml.etree.ElementTree as ET
-from statistics import stdev, mean, pstdev, quantiles
 from transformers import LlavaForConditionalGeneration, AutoTokenizer, AutoProcessor, BitsAndBytesConfig
 from PIL import Image
 
 # --- Configuration ---
 # The model files are expected to be on your SSD (D: drive).
 model_path = r"D:\hugging_face_ai_model" # Using raw string with backslashes
-
-# --- Strategic Prompt Optimization for High-Selectivity Scoring ---
 SYSTEM_PROMPT = (
-    "You are an Elite Content Editor specializing in generating viral, hyper-engaging short-form video content "
-    "(30 seconds minimum, 5 minutes absolute maximum). Your job is to be ruthlessly critical. "
-    "Rate the current video frame based on its **Highlight Potential (1-5)**. "
-    "**STATISTICAL MANDATE**: Only the top 5% of this entire video's moments may receive a Score of 5. The majority of observed content must be scored 3 or below. "
-    "Highlight Potential is defined by sudden, high-energy, AUDITORY AND EMOTIONAL INTENSITY, inferred from visual cues. "
-    "**VISUAL PROXIES FOR AUDIO/ACTION**: Look for sudden emotional changes (shock, fear, massive smile), rapid movement, major in-game explosions/success, and clear high-stakes events. "
-    "**CONTEXTUAL FLOW**: Penalize (-1 Score) any potential segment that begins or ends mid-sentence or mid-action, as this prevents contextual coherence. "
-    "**ENGAGEMENT RULE**: A score of 4 or 5 is invalid for any segment that takes longer than 90 seconds to establish its core value. Immediately discard segments that fail to provide an 'attention hook' within the first 3 seconds. "
-    "5 = Extreme Intensity (Top 5% rarity: Screaming, clear shock/fear, massive success/explosion). "
-    "4 = High Intensity (Intense focus, rapid action, visible startle/laugh). "
-    "3 = Medium Intensity (Mild conversation, minor movement, slightly engaged expression). "
+    "You are an expert stream analyst. Rate the current video frame based on its **Highlight Potential (1-10)**. "
+    "Highlight Potential is defined by **AUDITORY AND EMOTIONAL INTENSITY**, inferred from visual cues. "
+    "You MUST prioritize high scores for visual indicators of loud events. "
+    "**VISUAL PROXIES FOR AUDIO:** Look for open mouths, visible shock/fear, major on-screen explosions/events, and rapid screen shaking, as these strongly imply screaming or loud game noise. "
+    "You MUST use the full range of scores (1 to 10). "
+    "**CRITICAL RULE FOR LOW SCORES (1-2)**: You MUST score 1 or 2 if the streamer is NOT showing a strong emotional change (e.g., neutral/idle face), or if the screen content is static, shows a menu, a scorecard, or simple navigation/walking for over 5 seconds. Complex *static* overlays (like VTuber backgrounds) must be scored 1 or 2. "
+    "10 = Extreme Intensity (Screaming, clear shock/fear expression, massive in-game explosion/success). "
+    "7-9 = High Intensity (Intense focus, rapid action, visible startle, big smile/laugh). "
+    "3-6 = Medium Intensity (Mild conversation, minor movement, slightly engaged expression). "
     "1-2 = Low Intensity (Static scene, static scorecard/menu, neutral avatar, idle chat). "
-    "RESPOND ONLY with a single XML object containing the numeric score, like this: "
-    "<score>1</score>"
+    "RESPOND ONLY with a single JSON object containing the numeric score, like this: "
+    '{"score": 1}' 
 )
 
-# --- Segmentation Constants (Updated for 1-5 scale) ---
-HIGH_SCORE_MAX = 5.0 # New maximum score for the VLM
-MIN_SEGMENT_DURATION_S = 5.0 # Minimum raw duration (before buffers) for a high-score segment
+# --- Segmentation Constants ---
+HIGH_SCORE_THRESHOLD = 7.0 
+MERGE_GAP_SCORE_THRESHOLD = 6.0 # Avg score needed to justify merging two nearby segments
 MAX_GAP_TO_MERGE_S = 10.0 # Don't try to merge segments if they are separated by more than 10s
-CONTEXT_PRE_ROLL_SECONDS = 20 # Lead-in for context
+MIN_SEGMENT_DURATION_S = 5.0 # Minimum raw duration (before buffers) for a high-score segment
+CONTEXT_PRE_ROLL_SECONDS = 20  # Lead-in for context
 CONTEXT_POST_ROLL_SECONDS = 10 # Cool-down for reaction
-MINIMUM_FINAL_DURATION_S = 30.0 # Enforce a minimum clip length
-MAXIMUM_FINAL_DURATION_S = 300.0 # Enforce a maximum clip length (5 minutes)
+MINIMUM_FINAL_DURATION_S = 30.0 # Enforce a minimum clip length after buffers
 
 # --- Resource Capping for 12GB VRAM Systems ---
 GPU_DEVICE = "cuda" # Simplified device map to force GPU load (cuda:0)
@@ -93,8 +86,7 @@ def load_ai_model(path: str):
 def run_inference(model, tokenizer, processor, image, prompt, is_scoring=True):
     """
     Handles the core inference logic for both scoring and description.
-    Uses robust XML parsing for scoring output.
-    Returns the integer score (1-5) or the descriptive string.
+    Returns the integer score (1-10) or the descriptive string.
     """
     if model is None or tokenizer is None or processor is None:
         return 0 if is_scoring else "Model not initialized."
@@ -107,7 +99,7 @@ def run_inference(model, tokenizer, processor, image, prompt, is_scoring=True):
 
     try:
         if pil_image is None:
-            return 0 if is_scoring else "Image is None."
+             return 0 if is_scoring else "Image is None."
 
         # Construct the LLaVA prompt format
         if is_scoring:
@@ -121,7 +113,7 @@ def run_inference(model, tokenizer, processor, image, prompt, is_scoring=True):
         if 'input_ids' not in inputs:
             print("FATAL INPUT ERROR: 'input_ids' key is missing.", file=sys.stderr)
             return 0 if is_scoring else "Tokenizer failed."
-            
+        
         inputs = {k: v.to(model.device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
         
         if tokenizer.pad_token_id is None:
@@ -136,7 +128,7 @@ def run_inference(model, tokenizer, processor, image, prompt, is_scoring=True):
 
         if output_ids is None or output_ids.dim() == 0 or output_ids.size(0) == 0:
             return 0 if is_scoring else "Model generation failed."
-            
+        
         input_len = inputs['input_ids'].size(1)
         raw_response = tokenizer.decode(output_ids[0, input_len:], skip_special_tokens=True).strip()
 
@@ -144,32 +136,27 @@ def run_inference(model, tokenizer, processor, image, prompt, is_scoring=True):
             # Return raw description text
             return raw_response
 
-        # --- Structured Output Parsing for Scoring (XML) --- [1, 2]
-        # Layer 1 & 2: Regex Isolation and Extraction
-        # Look for the <score> tag, which is the mandatory output format. [1, 2]
-        xml_match = re.search(r"<score>(\d+\.?\d*)</score>", raw_response, re.IGNORECASE)
-        
-        score = 0
-        if xml_match:
+        # --- Structured Output Parsing for Scoring ---
+        json_start = raw_response.find('{')
+        json_end = raw_response.rfind('}') + 1
+
+        if json_start != -1 and json_end != 0:
+            json_str = raw_response[json_start:json_end]
             try:
-                score = float(xml_match.group(1))
-                # Clamp score between 1 and the new maximum (5)
-                return max(1, min(int(HIGH_SCORE_MAX), int(score))) 
-            except ValueError:
-                print(f"AI returned invalid numeric score in XML: {xml_match.group(1)}", file=sys.stderr)
+                data = json.loads(json_str)
+                score = int(data.get("score", 0))
+                return max(1, min(10, score)) # Clamp score between 1 and 10
+            except json.JSONDecodeError:
+                print(f"AI returned invalid JSON: {json_str}", file=sys.stderr)
                 return 0
         else:
-            # Fallback: Try to aggressively extract a score if XML parsing failed
+            # If JSON parsing fails, try to aggressively extract a score if the model just output a number
             try:
-                numeric_match = re.search(r'\d+', raw_response)
-                if numeric_match:
-                    score = int(numeric_match.group(0))
-                    return max(1, min(int(HIGH_SCORE_MAX), score))
+                score = int(raw_response.strip())
+                return max(1, min(10, score))
             except ValueError:
-                pass # Continue to final error message
-                
-            print(f"AI returned non-XML/non-numeric response (first 50 chars): {raw_response[:50]}...", file=sys.stderr)
-            return 0
+                print(f"AI returned non-JSON/non-numeric response: {raw_response[:50]}...", file=sys.stderr)
+                return 0
 
     except Exception as e:
         print(f"Error during AI inference: {e}", file=sys.stderr)
@@ -184,17 +171,18 @@ def get_visual_description(model, tokenizer, processor, image):
     prompt = "Describe the video frame in detail. Focus on the streamer avatar, the game interface, and any visible action or emotional state."
     return run_inference(model, tokenizer, processor, image, prompt, is_scoring=False)
 
-def merge_segments_intelligently(highlight_segments, scores, frame_rate, merge_gap_score_threshold):
+def merge_segments_intelligently(highlight_segments, scores, frame_rate):
     """
     Merges closely spaced segments only if the sampled frames between them 
-    maintain an average high score (above the dynamic threshold), preventing long, dull bridges.
+    maintain an average high score, preventing long, dull bridges.
     """
     if not highlight_segments:
-        return
+        return []
 
-    final_segments = # FIXED: List initialization
-    current_segment = highlight_segments # FIXED: Access first element
-
+    final_segments = []
+    current_segment = highlight_segments[0]
+    
+    # Extract only the 5-second sampling points we actually scored
     scored_frames = sorted(scores.keys())
 
     for i in range(1, len(highlight_segments)):
@@ -211,24 +199,25 @@ def merge_segments_intelligently(highlight_segments, scores, frame_rate, merge_g
             continue
 
         # 2. Check the scores in the bridging frames
-        # Find the sampled frames that fall between the segments 
+        # Find the sampled frames that fall between the segments (must be greater than current end and less than next start)
         gap_samples = [
             frame_idx for frame_idx in scored_frames 
-            if frame_idx >= current_segment['end_frame'] and frame_idx <= next_segment['start_frame'] # FIXED: Closing bracket added
-
+            if frame_idx >= current_segment['end_frame'] and frame_idx <= next_segment['start_frame']
+        ]
+        
         is_gap_high_intensity = False
         
         if not gap_samples:
-            # If the gap is small (e.g., less than 5 seconds), assume continuous action and merge.
-            if gap_time_s < 5.0:
-                is_gap_high_intensity = True
+             # If the gap is too small to contain a full 5-second sample point, 
+             # and the gap is small (e.g., less than 5 seconds), we assume continuous action and merge.
+             if gap_time_s < 5.0:
+                 is_gap_high_intensity = True
         else:
             gap_scores = [scores[frame_idx] for frame_idx in gap_samples]
             avg_gap_score = sum(gap_scores) / len(gap_scores)
             
-            # Use the dynamic threshold derived from P80
-            is_gap_high_intensity = avg_gap_score >= merge_gap_score_threshold
-            print(f"DEBUG: Segment gap from {current_segment['end_frame']} to {next_segment['start_frame']} (Duration {gap_time_s:.2f}s). Avg Gap Score: {avg_gap_score:.2f} (Merge Threshold: {merge_gap_score_threshold:.2f}, Merge: {is_gap_high_intensity})", file=sys.stderr)
+            is_gap_high_intensity = avg_gap_score >= MERGE_GAP_SCORE_THRESHOLD
+            print(f"DEBUG: Segment gap from {current_segment['end_frame']} to {next_segment['start_frame']} (Duration {gap_time_s:.2f}s). Avg Gap Score: {avg_gap_score:.2f} (Merge: {is_gap_high_intensity})", file=sys.stderr)
 
         
         if is_gap_high_intensity:
@@ -244,25 +233,25 @@ def merge_segments_intelligently(highlight_segments, scores, frame_rate, merge_g
     return final_segments
 
 def analyze_video(video_path, output_dir):
-    """Analyzes video for highlights using the Llava AI model, incorporating dynamic thresholds and duration constraints."""
+    """Analyzes video for highlights using the Llava AI model."""
 
     # --- Model Loading (Attempt once at the start) ---
     model, tokenizer, processor = load_ai_model(model_path)
     if model is None:
         print("FATAL: AI Model failed to load. Cannot proceed with analysis.", file=sys.stderr)
-        return
+        return []
 
     print(f"Analyzing video: {video_path} using local Llava model.")
     print("INFO: Starting video analysis loop.", file=sys.stderr)
 
     if not os.path.exists(video_path):
         print(f"Error: Video file not found at {video_path}", file=sys.stderr)
-        return
+        return []
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"Error opening video file: {video_path}", file=sys.stderr)
-        return
+        return []
 
     frame_rate = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -270,7 +259,7 @@ def analyze_video(video_path, output_dir):
     print(f"Video details: FPS={frame_rate}, Total Frames={total_frames}, Duration={VIDEO_DURATION_SECONDS:.2f}s", file=sys.stderr)
 
     # --- Frame Processing Setup ---
-    interval_seconds = 5
+    interval_seconds = 5 
     frame_interval = max(1, int(frame_rate * interval_seconds))
     
     # --- VISUAL COMPREHENSION TEST (Skip initial frames for stability) ---
@@ -321,32 +310,8 @@ def analyze_video(video_path, output_dir):
     cap.release()
     print("Video analysis complete. Finding segments...")
     
-    
-    # --- Dynamic Threshold Calculation (P95 for selection, P80 for merging) ---
-    all_scores = list(scores.values())
-    
-    if not all_scores:
-         print("ERROR: No valid scores collected. Cannot segment video.", file=sys.stderr)
-         return
-         
-    # Calculate Percentiles for dynamic thresholding
-    try:
-        score_quantiles = quantiles(all_scores, n=100) # Calculate 100 quantiles
-        HIGH_SCORE_THRESHOLD = score_quantiles # P95 (index 94 for 95th percentile boundary)
-        MERGE_GAP_SCORE_THRESHOLD = score_quantiles # P80 (index 79 for 80th percentile boundary)
-        # Ensure minimum score of 4.0 is required for a segment to be considered P95
-        HIGH_SCORE_THRESHOLD = max(4.0, HIGH_SCORE_THRESHOLD) 
-    except Exception:
-        # Fallback if quantiles fails (e.g., too few data points)
-        HIGH_SCORE_THRESHOLD = 4.0 
-        MERGE_GAP_SCORE_THRESHOLD = 3.0
-        print("WARNING: Insufficient scores for dynamic thresholding. Using fixed thresholds (4.0/3.0).", file=sys.stderr)
-        
-    print(f"DYNAMIC THRESHOLDS: P95 (Selection)={HIGH_SCORE_THRESHOLD:.2f}, P80 (Merging)={MERGE_GAP_SCORE_THRESHOLD:.2f}", file=sys.stderr)
-    
-    
-    # --- 1. Initial Highlight Segmentation Logic (Dynamic Thresholding) ---
-    highlight_segments = # FIXED: List initialization
+    # --- 1. Initial Highlight Segmentation Logic (Simple Thresholding) ---
+    highlight_segments = []
     min_duration_frames = int(frame_rate * MIN_SEGMENT_DURATION_S)
     
     current_highlight_start = -1
@@ -359,10 +324,8 @@ def analyze_video(video_path, output_dir):
         if score >= HIGH_SCORE_THRESHOLD:
             if current_highlight_start == -1:
                 current_highlight_start = frame_idx
-        elif current_highlight_start!= -1:
-            # End frame is the last scored frame before the drop, 
-            # or simply the frame where the score dropped (depending on sampling strategy)
-            end_frame_idx = frame_idx 
+        elif current_highlight_start != -1:
+            end_frame_idx = frame_idx
             duration = end_frame_idx - current_highlight_start
             
             if duration >= min_duration_frames:
@@ -373,7 +336,7 @@ def analyze_video(video_path, output_dir):
             
             current_highlight_start = -1
 
-    if current_highlight_start!= -1:
+    if current_highlight_start != -1:
         end_frame_idx = total_frames - 1
         duration = end_frame_idx - current_highlight_start
         if duration >= min_duration_frames:
@@ -382,47 +345,40 @@ def analyze_video(video_path, output_dir):
                 'end_frame': end_frame_idx 
             })
 
-    # --- 2. Smart Segment Merging (using dynamic threshold) ---
-    final_segments = merge_segments_intelligently(highlight_segments, scores, frame_rate, MERGE_GAP_SCORE_THRESHOLD)
+    # --- 2. Smart Segment Merging ---
+    final_segments = merge_segments_intelligently(highlight_segments, scores, frame_rate)
     print(f"Found {len(final_segments)} final segments after smart merging.", file=sys.stderr)
     
-    # --- 3. Contextual Segment Calculation & Duration Enforcement ---
-    time_segments = # FIXED: List initialization
+    # --- 3. Contextual Segment Calculation ---
+    time_segments = []
     for segment in final_segments:
         raw_start_time = segment['start_frame'] / frame_rate
         raw_end_time = segment['end_frame'] / frame_rate
         
         # Apply contextual buffers and clamp times
-        # Apply micro-optimization (0.5s closer to action for engagement hook)
-        buffered_start_raw = max(0.0, raw_start_time - CONTEXT_PRE_ROLL_SECONDS)
-        # Advanced adjustment: Ensure buffered start doesn't exceed the raw start time
-        buffered_start = min(buffered_start_raw + 0.5, raw_start_time) 
+        buffered_start = max(0.0, raw_start_time - CONTEXT_PRE_ROLL_SECONDS)
         buffered_end = min(VIDEO_DURATION_SECONDS, raw_end_time + CONTEXT_POST_ROLL_SECONDS)
 
+        # Calculate the final duration for the cut
         final_duration = buffered_end - buffered_start
 
-        # Enforce Minimum Duration
+        
         if final_duration < MINIMUM_FINAL_DURATION_S:
-            print(f"Skipping segment: final duration {final_duration:.2f}s is less than minimum {MINIMUM_FINAL_DURATION_S}s.", file=sys.stderr)
-            continue
-            
-        # Enforce Maximum Duration (5 minutes) [3, 4]
-        if final_duration > MAXIMUM_FINAL_DURATION_S:
-            # Trim the end to maintain the required maximum length
-            buffered_end = buffered_start + MAXIMUM_FINAL_DURATION_S
-            final_duration = MAXIMUM_FINAL_DURATION_S
-            print(f"WARNING: Segment exceeded {MAXIMUM_FINAL_DURATION_S}s. Trimming end time to {buffered_end:.2f}s.", file=sys.stderr)
-
+             # Skip this segment if the buffered duration is too short
+             print(f"Skipping segment: final duration {final_duration:.2f}s is less than minimum {MINIMUM_FINAL_DURATION_S}s.", file=sys.stderr)
+             continue
+        
+        # NOTE: No upper duration cap is enforced.
         
         time_segments.append({
             'start': buffered_start,
             'duration': final_duration
         })
 
-    print(f"Found {len(time_segments)} segments (Contextualized and Clamped): {time_segments}", file=sys.stderr)
+    print(f"Found {len(time_segments)} segments (Contextualized): {time_segments}", file=sys.stderr)
 
-    # --- 4. Video Cutting (FFMPEG with Re-encoding for Precision) --- [5, 6]
-    output_files = # FIXED: List initialization
+    # --- Video Cutting (Actual FFMPEG Execution) & Path Conversion ---
+    output_files = []
     ffmpeg_cmd = "ffmpeg" 
     
     for i, segment in enumerate(time_segments):
@@ -431,20 +387,14 @@ def analyze_video(video_path, output_dir):
         output_file_name = f"highlight_{i+1}.mp4" 
         output_path_abs = os.path.join(output_dir, output_file_name)
         
-        # FFMPEG Command Optimization:
-        # 1. -ss BEFORE -i for accurate input seeking. [5]
-        # 2. Use libx264 re-encoding for frame accuracy (no -c copy). [5]
         command = [
             ffmpeg_cmd,
             "-y", 
-            "-ss", str(start_time), # Input seeking (Precise)
+            "-ss", str(start_time),
             "-i", video_path,
             "-t", str(duration),
-            "-c:v", "libx264", # Force re-encode for frame accuracy [5]
-            "-preset", "veryfast", # Faster processing
-            "-crf", "23", # Good quality
-            "-c:a", "aac",
-            "-b:a", "192k",
+            "-c:v", "copy", 
+            "-c:a", "copy",
             output_path_abs
         ]
         
@@ -456,6 +406,7 @@ def analyze_video(video_path, output_dir):
             print(f"SUCCESS: Highlight {i+1} cut and saved to {output_path_abs}", file=sys.stderr)
             
             # --- Path Conversion for Frontend/UI ---
+            # Convert absolute path to URL relative to the public folder
             path_segments = output_path_abs.split(os.sep)
             try:
                 # Find the index of 'public' and include everything after it, then prepend /
@@ -490,25 +441,25 @@ if __name__ == '__main__':
     output_dir = None
     try:
         if len(sys.argv) > 2:
-            video_path = sys.argv[7]
-            output_dir = sys.argv[8]
+            video_path = sys.argv[1]
+            output_dir = sys.argv[2]
             
             analyze_video(video_path, output_dir)
         else:
             print("ERROR: Script requires video_path and output_dir arguments.", file=sys.stderr, flush=True)
             # Ensure the script exits cleanly if arguments is missing
             print("---PYTHON-OUTPUT-START---")
-            print("")
+            print("[]")
             print("---PYTHON-OUTPUT-END---")
             
     except Exception as main_error:
         print(f"CRITICAL PYTHON ERROR in main execution block: {main_error}", file=sys.stderr)
         # We still need to print the output-start/end tags for the API to not hang
         print("---PYTHON-OUTPUT-START---")
-        print("")
+        print("[]")
         print("---PYTHON-OUTPUT-END---")
         
     finally:
         # Cleanup runs whether try succeeds or fails, as long as output_dir was set
         if output_dir is not None and os.path.exists(output_dir):
-            cleanup_directory(output_dir)
+             cleanup_directory(output_dir)
