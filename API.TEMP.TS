@@ -22,6 +22,8 @@ interface ErrorResponse {
 export const config = {
   api: {
     bodyParser: false,
+    // Increased the internal Next.js request size limit to 6GB
+    sizeLimit: "6gb",
   },
 };
 
@@ -29,7 +31,7 @@ const PYTHON_SCRIPT_PATH = path.join(process.cwd(), "highlight_generator.py");
 const VIDEO_UPLOAD_DIR = path.join(process.cwd(), "public", "temp");
 const VIDEO_OUTPUT_DIR = path.join(process.cwd(), "public", "videos");
 
-// FIX: Added NextApiRequest type to 'req' and explicit return type.
+// Function to handle the formidable file upload parsing
 const parseForm = (
   req: NextApiRequest
 ): Promise<{ videoPath: string; originalFilename: string }> => {
@@ -37,19 +39,21 @@ const parseForm = (
     const form = new IncomingForm({
       uploadDir: VIDEO_UPLOAD_DIR,
       keepExtensions: true,
-      maxFileSize: 500 * 1024 * 1024, // 500MB limit
+      // Increased formidable's maxFileSize to 6GB
+      maxFileSize: 6 * 1024 * 1024 * 1024,
     });
 
     form.parse(req, (err, fields, files) => {
-      if (err) return reject(err);
+      if (err) {
+        console.error("Formidable parse error:", err);
+        return reject(err);
+      }
 
       const videoFile = files.video?.[0];
       if (!videoFile) {
         return reject(new Error("No video file provided."));
       }
 
-      // FIX: Used non-null assertion operator (!) because we are confident
-      // that if videoFile exists after formidable parse, these fields will be strings.
       resolve({
         videoPath: videoFile.filepath!,
         originalFilename: videoFile.originalFilename!,
@@ -58,7 +62,7 @@ const parseForm = (
   });
 };
 
-// FIX: Added NextApiRequest and NextApiResponse types to 'req' and 'res'.
+// Main API handler function
 export default async function handler(
   req: NextApiRequest,
   res: NextApiResponse<SuccessResponse | ErrorResponse>
@@ -70,34 +74,43 @@ export default async function handler(
     });
   }
 
+  // Ensure directories exist
   await fs.mkdir(VIDEO_UPLOAD_DIR, { recursive: true });
   await fs.mkdir(VIDEO_OUTPUT_DIR, { recursive: true });
 
   let tempVideoPath: string | null = null;
 
   try {
-    // FIX: Destructuring is now safe because parseForm has an explicit return type.
+    // 1. Parse the incoming video file
     const { videoPath, originalFilename } = await parseForm(req);
     tempVideoPath = videoPath;
 
+    // Create a unique output directory for this job
     const uniqueId =
       path.parse(path.basename(originalFilename)).name + "_" + Date.now();
     const jobOutputDir = path.join(VIDEO_OUTPUT_DIR, uniqueId);
     await fs.mkdir(jobOutputDir, { recursive: true });
 
+    console.log(
+      `Starting Python script with input: ${tempVideoPath} and output: ${jobOutputDir}`
+    );
+
+    // 2. Spawn the Python process
     const pythonProcess = spawn("python", [
       PYTHON_SCRIPT_PATH,
-      tempVideoPath,
-      jobOutputDir,
+      tempVideoPath, // Argument 1: Path to the uploaded video
+      jobOutputDir, // Argument 2: Path where output videos should be saved
     ]);
 
     let pythonStdout = "";
     let pythonStderr = "";
 
+    // Capture standard output and error streams
     pythonProcess.stdout.on("data", (data) => {
       const output = data.toString();
       pythonStdout += output;
-      console.log("Python stdout chunk:", output);
+      // You can see the Python logs streamed in real-time here
+      // console.log("Python stdout chunk:", output);
     });
 
     pythonProcess.stderr.on("data", (data) => {
@@ -106,17 +119,18 @@ export default async function handler(
       console.error("Python stderr chunk:", output);
     });
 
+    // Wait for the Python process to finish
     const exitCode = await new Promise<number>((resolve) => {
       pythonProcess.on("close", resolve);
     });
 
+    // 3. Check for successful exit
     if (exitCode !== 0) {
       console.error(`Python script exited with code ${exitCode}`);
-      throw new Error(
-        `Video processing failed. Check Python logs in the server console.`
-      );
+      throw new Error(`Video processing failed. Python Logs: ${pythonStderr}`);
     }
 
+    // 4. Extract structured data (JSON) from stdout using markers
     const startMarker = "---PYTHON-OUTPUT-START---\n";
     const endMarker = "\n---PYTHON-OUTPUT-END---";
 
@@ -132,24 +146,34 @@ export default async function handler(
       const jsonString = pythonStdout
         .substring(startIndex + startMarker.length, endIndex)
         .trim();
+
+      console.log("Attempting to parse JSON from Python output:", jsonString);
+
       const absolutePaths: string[] = JSON.parse(jsonString);
 
-      // FIX: Parameter 'absPath' explicitly typed as string.
+      // 5. Convert absolute server paths to relative public URLs for the frontend
       highlightUrls = absolutePaths.map((absPath: string) => {
+        // The path is relative to the 'public' directory
         const relativePath = path
           .relative(path.join(process.cwd(), "public"), absPath)
-          .replace(/\\/g, "/");
+          .replace(/\\/g, "/"); // Normalize path separators for URL
         return "/" + relativePath;
       });
+    } else {
+      console.warn(
+        "Could not find start/end markers in Python output. Output was:",
+        pythonStdout
+      );
+      // We can still proceed, but highlightUrls will be empty, which might be an error.
     }
 
+    // 6. Send the successful response to the Next.js frontend
     res.status(200).json({
       highlightUrls,
       message: "Processing complete. Highlights generated.",
       pythonLogs: pythonStderr,
     });
   } catch (error: unknown) {
-    // FIX: Safely handles 'error' of type 'unknown' and extracts message.
     let errorMessage = "An unknown error occurred.";
     if (error instanceof Error) {
       errorMessage = error.message;
@@ -162,6 +186,7 @@ export default async function handler(
       .status(500)
       .json({ message: "Error processing video.", error: errorMessage });
   } finally {
+    // 7. Cleanup the temporary input file
     if (tempVideoPath && fsSync.existsSync(tempVideoPath)) {
       await fs.unlink(tempVideoPath);
       console.log("Temporary input file cleaned up.");

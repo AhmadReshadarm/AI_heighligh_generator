@@ -10,7 +10,6 @@ const translations = {
     languageName: "English",
     title: "TWITCH HIGHLIGHT ENGINE",
     uploadLabel: "Upload Game Footage (.mp4)",
-    promptLabel: "Custom AI Prompt (Optional)",
     buttonGenerate: "GENERATE HIGHLIGHTS (AI DURATION: 30-90s)",
     buttonProcessing: "INITIATING AI... DO NOT CLOSE",
     processingTitle: "AI Analysis in Progress...",
@@ -37,7 +36,6 @@ const translations = {
     languageName: "Русский",
     title: "ДВИЖОК ХАЙЛАЙТОВ TWITCH",
     uploadLabel: "Загрузить Игровой Материал (.mp4)",
-    promptLabel: "Пользовательский запрос ИИ (необязательно)",
     buttonGenerate: "СОЗДАТЬ ХАЙЛАЙТЫ (ДЛИТЕЛЬНОСТЬ ИИ: 30-90с)",
     buttonProcessing: "ЗАПУСК ИИ... НЕ ЗАКРЫВАЙТЕ",
     processingTitle: "ИИ-Анализ в Процессе...",
@@ -68,7 +66,6 @@ type TranslationSet = (typeof translations)["EN"];
 
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
-  const [prompt, setPrompt] = useState<string>("");
   const [highlightUrls, setHighlightUrls] = useState<string[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [progressMessage, setProgressMessage] =
@@ -102,10 +99,6 @@ export default function Home() {
     setLogMessages([]); // Clear logs on new file selection
   };
 
-  const handlePromptChange = (e: ChangeEvent<HTMLInputElement>) => {
-    setPrompt(e.target.value);
-  };
-
   // Helper to add a log message and scroll to bottom (simulated auto-scroll)
   const addLogMessage = (message: string, delay: number = 0) => {
     // Simulate delayed logging (as a real server process would be asynchronous)
@@ -133,7 +126,6 @@ export default function Home() {
 
       const formData = new FormData();
       formData.append("video", file);
-      formData.append("prompt", prompt); // Append the prompt
 
       try {
         // Step 1: Uploading
@@ -222,7 +214,7 @@ export default function Home() {
         setLoading(false);
       }
     },
-    [file, prompt, T]
+    [file, T]
   ); // T dependency ensures the translated messages are used
 
   const { step: currentStep, desc: currentDesc } = useMemo(() => {
@@ -417,29 +409,6 @@ export default function Home() {
                     hover:file:from-[#CC0088] hover:file:to-[#00CCFF] cursor-pointer transition-all
                     disabled:opacity-40 disabled:cursor-not-allowed
                   "
-                />
-              </div>
-
-              {/* NEW INPUT FIELD FOR PROMPT */}
-              <div className="flex flex-col space-y-3">
-                <label
-                  htmlFor="prompt-input"
-                  className="text-xl font-bold text-[#FF00AA]"
-                >
-                  <span className="block transition-colors duration-200">
-                    {T.promptLabel}
-                  </span>
-                </label>
-                <input
-                  type="text"
-                  id="prompt-input"
-                  value={prompt}
-                  onChange={handlePromptChange}
-                  disabled={loading}
-                  placeholder="e.g., 'Find moments of intense gunfights only.'"
-                  className="bg-gray-800 text-gray-200 p-3 rounded-sm border-2 border-[#00FFFF] placeholder-gray-500
-                    focus:outline-none focus:ring-2 focus:ring-[#FF00AA]
-                    transition-all duration-200"
                 />
               </div>
 

@@ -10,8 +10,15 @@ const translations = {
     languageName: "English",
     title: "TWITCH HIGHLIGHT ENGINE",
     uploadLabel: "Upload Game Footage (.mp4)",
-    promptLabel: "Custom AI Prompt (Optional)",
-    buttonGenerate: "GENERATE HIGHLIGHTS (AI DURATION: 30-90s)",
+    targetDurationLabel: "Target Highlight Duration (seconds: 30-90 recommended)",
+    durationPlaceholder: "e.g., 60",
+    durationHelp: "This controls the desired length of the total generated highlights.",
+    // NEW PROMPT INPUT
+    promptLabel: "AI Editing Prompt (Optional)",
+    promptPlaceholder: "e.g., Only focus on headshots and quick scope kills, exclude deaths.",
+    promptHelp: "Customize AI analysis. Leave empty for the default high-action game prompt.",
+    // END NEW
+    buttonGenerate: "GENERATE HIGHLIGHTS",
     buttonProcessing: "INITIATING AI... DO NOT CLOSE",
     processingTitle: "AI Analysis in Progress...",
     step1: "1/2: Uploading video and preparing for analysis...",
@@ -30,15 +37,21 @@ const translations = {
     clipLabel: "CLIP #",
     download: "DOWNLOAD",
     downloadButton: "DOWNLOAD CLIP",
-    // New log message translations (optional, but good practice)
     logTitle: "ANALYSIS LOGS",
   },
   RU: {
     languageName: "Русский",
     title: "ДВИЖОК ХАЙЛАЙТОВ TWITCH",
     uploadLabel: "Загрузить Игровой Материал (.mp4)",
-    promptLabel: "Пользовательский запрос ИИ (необязательно)",
-    buttonGenerate: "СОЗДАТЬ ХАЙЛАЙТЫ (ДЛИТЕЛЬНОСТЬ ИИ: 30-90с)",
+    targetDurationLabel: "Целевая Длительность Хайлайта (секунды: 30-90 рекомендовано)",
+    durationPlaceholder: "напр., 60",
+    durationHelp: "Это контролирует желаемую общую продолжительность сгенерированных хайлайтов.",
+    // NEW PROMPT INPUT
+    promptLabel: "Промпт для Редактирования ИИ (Необязательно)",
+    promptPlaceholder: "напр., Сфокусируйтесь только на хедшотах и быстрых убийствах, исключая смерти.",
+    promptHelp: "Настройте анализ ИИ. Оставьте пустым для промпта по умолчанию.",
+    // END NEW
+    buttonGenerate: "СОЗДАТЬ ХАЙЛАЙТЫ",
     buttonProcessing: "ЗАПУСК ИИ... НЕ ЗАКРЫВАЙТЕ",
     processingTitle: "ИИ-Анализ в Процессе...",
     step1: "1/2: Загрузка видео и подготовка к анализу...",
@@ -58,7 +71,6 @@ const translations = {
     clipLabel: "КЛИП №",
     download: "СКАЧАТЬ",
     downloadButton: "СКАЧАТЬ КЛИП",
-    // New log message translations
     logTitle: "ЛОГИ АНАЛИЗА",
   },
 };
@@ -68,14 +80,16 @@ type TranslationSet = (typeof translations)["EN"];
 
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
-  const [prompt, setPrompt] = useState<string>("");
   const [highlightUrls, setHighlightUrls] = useState<string[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [progressMessage, setProgressMessage] =
     useState<string>("Ready to analyze");
   const [error, setError] = useState<string | null>(null);
 
-  // New state for detailed logs
+  // State for user inputs
+  const [targetDuration, setTargetDuration] = useState<number>(60); 
+  const [userPrompt, setUserPrompt] = useState<string>(""); // NEW: User prompt state
+
   const [logMessages, setLogMessages] = useState<string[]>([]);
 
   // State for current language - SET TO 'RU' AS DEFAULT
@@ -85,12 +99,11 @@ export default function Home() {
   // Helper function to format progress message strings (like "1/2: ...")
   const formatProgress = (key: keyof TranslationSet) => {
     const message = T[key] as string;
-    // For progress messages, split the step number from the description
     const [step, desc] = message
       .split(/:(.*)/s)
       .map((s) => s.trim())
       .filter(Boolean);
-    return { step, desc: desc || step }; // Ensure desc is not null/empty
+    return { step, desc: desc || step }; 
   };
 
   const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
@@ -99,20 +112,29 @@ export default function Home() {
     setHighlightUrls([]);
     setError(null);
     setProgressMessage("Ready to analyze");
-    setLogMessages([]); // Clear logs on new file selection
+    setLogMessages([]); 
+  };
+  
+  const handleDurationChange = (e: ChangeEvent<HTMLInputElement>) => {
+    const value = parseInt(e.target.value, 10);
+    if (!isNaN(value) && value >= 10 && value <= 180) {
+      setTargetDuration(value);
+    } else if (e.target.value === "") {
+      setTargetDuration(0); 
+    }
+  };
+  
+  // NEW: Handler for user prompt
+  const handlePromptChange = (e: ChangeEvent<HTMLTextAreaElement>) => {
+    setUserPrompt(e.target.value);
   };
 
-  const handlePromptChange = (e: ChangeEvent<HTMLInputElement>) => {
-    setPrompt(e.target.value);
-  };
 
   // Helper to add a log message and scroll to bottom (simulated auto-scroll)
   const addLogMessage = (message: string, delay: number = 0) => {
-    // Simulate delayed logging (as a real server process would be asynchronous)
     setTimeout(() => {
       setLogMessages((prev) => {
         const nextLogs = [...prev, message];
-        // In a real app, you'd scroll the log container here.
         return nextLogs;
       });
     }, delay);
@@ -125,33 +147,30 @@ export default function Home() {
         setError(T.errorSelectFile);
         return;
       }
+      if (targetDuration < 10 || targetDuration > 180) {
+        setError("Target duration must be between 10 and 180 seconds.");
+        return;
+      }
 
       setLoading(true);
       setError(null);
       setHighlightUrls([]);
-      setLogMessages([]); // Clear logs before new submission
+      setLogMessages([]); 
 
       const formData = new FormData();
       formData.append("video", file);
-      formData.append("prompt", prompt); // Append the prompt
+      formData.append("targetDuration", targetDuration.toString());
+      // NEW: Append the user prompt
+      formData.append("userPrompt", userPrompt); 
 
       try {
         // Step 1: Uploading
         setProgressMessage(T.step1);
         addLogMessage(
-          `[CLIENT] Starting upload of ${file.name} (${(
-            file.size /
-            1024 /
-            1024
-          ).toFixed(2)} MB)...`
+          `[CLIENT] Starting upload of ${file.name}. Duration: ${targetDuration}s. Prompt: "${userPrompt.substring(0, 50)}..."`
         );
 
-        // Simulate further logging during the initial upload/prep phase
         addLogMessage(`[SERVER] Preparing environment...`, 1000);
-        addLogMessage(
-          `[SERVER] Received file. Hashing file for integrity check.`,
-          2500
-        );
 
         // Step 2: AI Processing (This is the long, single API call)
         setProgressMessage(T.step2);
@@ -165,7 +184,6 @@ export default function Home() {
           );
         }, 15000);
 
-        // NOTE: This fetch call is designed to hit the backend API route defined in analyze.ts (or similar).
         const response = await fetch("/api/generate", {
           method: "POST",
           body: formData,
@@ -175,31 +193,29 @@ export default function Home() {
 
         const data = await response.json();
 
+        // 3. Process logs from Python (both error and success cases)
+        if (data.pythonLogs) {
+          // Split logs by newline to display them individually for progress simulation
+          data.pythonLogs.split('\n').forEach((log: string, index: number) => {
+            if(log.trim()) {
+              // Add a slight delay to simulate logs streaming in over time
+              addLogMessage(`[PYTHON] ${log}`, 100 * index);
+            }
+          });
+        }
+
         if (!response.ok) {
-          console.error("Backend Error Logs:", data.pythonLogs);
-          // Append Python logs to the log display on error
-          if (data.pythonLogs && Array.isArray(data.pythonLogs)) {
-            data.pythonLogs.forEach((log: string, index: number) => {
-              addLogMessage(`[PYTHON LOG] ${log}`, 100 * index);
-            });
-          }
+          console.error("Backend Error Logs:", data.error);
           throw new Error(data.error || T.errorDefault);
         }
 
         // Success:
         if (data.highlightUrls && data.highlightUrls.length > 0) {
-          // Append final success message
-          if (data.pythonLogs && Array.isArray(data.pythonLogs)) {
-            data.pythonLogs.forEach((log: string, index: number) => {
-              addLogMessage(`[PYTHON LOG] ${log}`, 100 * index);
-            });
-          }
-
           setHighlightUrls(data.highlightUrls);
           setProgressMessage(T.complete);
           addLogMessage(
             `[CLIENT] ${T.complete}`,
-            data.pythonLogs.length * 100 + 500
+            500
           );
         } else {
           setError(T.errorNoHighlights);
@@ -222,11 +238,10 @@ export default function Home() {
         setLoading(false);
       }
     },
-    [file, prompt, T]
-  ); // T dependency ensures the translated messages are used
+    [file, targetDuration, userPrompt, T] // userPrompt is now a dependency
+  ); 
 
   const { step: currentStep, desc: currentDesc } = useMemo(() => {
-    // Determine which description to show in the loading card
     return formatProgress(
       (Object.keys(T).find(
         (key) => T[key as keyof TranslationSet] === progressMessage
@@ -245,6 +260,7 @@ export default function Home() {
     >
       <title>AI Video Highlight Generator</title>
       <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <script src="https://cdn.tailwindcss.com"></script>
       <style>{`
         /* SONY ANIMATION / SPIDER-VERSE STYLE */
         body { font-family: 'Inter', sans-serif; }
@@ -336,13 +352,12 @@ export default function Home() {
         {/* ============================== */}
 
         <div className="max-w-xl mx-auto">
-          {/* LOADING CARD (Nezuko Focused - SONY STYLE) */}
+          {/* LOADING CARD (Progress and Logs) */}
           {loading && (
             <div className="bg-[#1e1e1e] p-8 mb-8 flex flex-col items-center text-center space-y-4 sony-card">
               <img
-                src="/nezuko-running-mobile-digital-art-o53j2jqvcljywo2f.webp"
-                alt="Nezuko Running Loader"
-                // Nezuko is larger and centered
+                src="https://placehold.co/160x160/FF00AA/101010?text=AI+RUN"
+                alt="AI Analysis Loader"
                 className="w-40 h-40 object-cover border-4 border-[#FF00AA] transform scale-x-[-1]"
                 style={{ borderRadius: "50%", boxShadow: "0 0 15px #00FFFF" }}
               />
@@ -369,9 +384,9 @@ export default function Home() {
               </div>
               <p className="text-sm text-gray-400 mt-2">{T.loadingNote}</p>
 
-              {/* --- NEW LOG SECTION --- */}
+              {/* --- LOG SECTION (The "Cool Interface") --- */}
               <div
-                className="w-full mt-4 p-4 text-left bg-gray-800 rounded-sm border-2 border-[#00FFFF] max-h-40 overflow-y-auto"
+                className="w-full mt-4 p-4 text-left bg-gray-800 rounded-sm border-2 border-[#00FFFF] max-h-60 overflow-y-auto"
                 style={{ boxShadow: "4px 4px 0 #FF00AA" }}
               >
                 <h3 className="text-sm font-bold text-[#FF00AA] mb-1 uppercase tracking-wider">
@@ -386,6 +401,8 @@ export default function Home() {
                     {log}
                   </p>
                 ))}
+                {/* Scroll to bottom placeholder - in a real app, we'd use a ref */}
+                <div ref={(el) => el?.scrollIntoView({ behavior: 'smooth' })} />
               </div>
               {/* ----------------------- */}
             </div>
@@ -394,6 +411,7 @@ export default function Home() {
           {/* MAIN FORM CARD - SONY STYLE */}
           <div className="bg-[#1e1e1e] p-6 mb-12 sony-card">
             <form onSubmit={handleSubmit} className="space-y-6">
+              {/* 1. VIDEO UPLOAD INPUT */}
               <div className="flex flex-col space-y-3">
                 <label
                   htmlFor="video-upload"
@@ -420,35 +438,65 @@ export default function Home() {
                 />
               </div>
 
-              {/* NEW INPUT FIELD FOR PROMPT */}
+              {/* 2. TARGET DURATION INPUT */}
               <div className="flex flex-col space-y-3">
                 <label
-                  htmlFor="prompt-input"
-                  className="text-xl font-bold text-[#FF00AA]"
+                  htmlFor="duration-target"
+                  className="text-xl font-bold text-[#00FFFF]"
+                >
+                  <span className="block transition-colors duration-200">
+                    {T.targetDurationLabel}
+                  </span>
+                </label>
+                <input
+                  type="number"
+                  id="duration-target"
+                  value={targetDuration === 0 ? "" : targetDuration}
+                  onChange={handleDurationChange}
+                  min="10"
+                  max="180"
+                  placeholder={T.durationPlaceholder}
+                  disabled={loading}
+                  className="w-full p-3 bg-gray-800 border-2 border-[#FF00AA] text-white rounded-sm focus:border-[#00FFFF] focus:ring-[#00FFFF] focus:ring-1 transition-all"
+                  style={{ boxShadow: "2px 2px 0 #000" }}
+                />
+                <p className="text-sm text-gray-400 mt-2">
+                  {T.durationHelp}
+                </p>
+              </div>
+              
+              {/* 3. NEW INPUT: USER PROMPT (Textarea) */}
+              <div className="flex flex-col space-y-3">
+                <label
+                  htmlFor="user-prompt"
+                  className="text-xl font-bold text-[#00FFFF]"
                 >
                   <span className="block transition-colors duration-200">
                     {T.promptLabel}
                   </span>
                 </label>
-                <input
-                  type="text"
-                  id="prompt-input"
-                  value={prompt}
+                <textarea
+                  id="user-prompt"
+                  value={userPrompt}
                   onChange={handlePromptChange}
+                  rows={3}
+                  placeholder={T.promptPlaceholder}
                   disabled={loading}
-                  placeholder="e.g., 'Find moments of intense gunfights only.'"
-                  className="bg-gray-800 text-gray-200 p-3 rounded-sm border-2 border-[#00FFFF] placeholder-gray-500
-                    focus:outline-none focus:ring-2 focus:ring-[#FF00AA]
-                    transition-all duration-200"
-                />
+                  className="w-full p-3 bg-gray-800 border-2 border-[#FF00AA] text-white rounded-sm focus:border-[#00FFFF] focus:ring-[#00FFFF] focus:ring-1 transition-all resize-none"
+                  style={{ boxShadow: "2px 2px 0 #000" }}
+                ></textarea>
+                <p className="text-sm text-gray-400 mt-2">
+                  {T.promptHelp}
+                </p>
               </div>
+
 
               <button
                 type="submit"
-                disabled={!file || loading}
+                disabled={!file || loading || targetDuration < 10}
                 className={`w-full py-4 px-4 font-extrabold text-lg text-white sony-button
                   ${
-                    !file || loading
+                    !file || loading || targetDuration < 10
                       ? "bg-gray-700 text-gray-400 cursor-not-allowed opacity-50"
                       : "bg-gradient-to-r from-[#FF00AA] to-[#00FFFF] hover:from-[#CC0088] hover:to-[#00CCFF]"
                   }
@@ -490,14 +538,12 @@ export default function Home() {
                   <div className="p-4">
                     <video
                       controls
-                      // FIX: Prepend the BASE_URL to the video URL for correct path resolution
                       src={`${BASE_URL}${url}`}
                       className="w-full mb-4 aspect-video bg-black border-4 border-[#FF00AA] shadow-xl"
                     >
                       Your browser does not support the video tag.
                     </video>
                     <a
-                      // FIX: Prepend the BASE_URL to the download link
                       href={`${BASE_URL}${url}`}
                       download={`highlight_clip_${index + 1}.mp4`}
                       className="block w-full text-center py-2 px-4 font-extrabold text-white sony-button bg-gradient-to-r from-[#FF00AA] to-[#00FFFF] hover:from-[#CC0088] hover:to-[#00CCFF]"
